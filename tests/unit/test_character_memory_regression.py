@@ -107,17 +107,71 @@ def test_profile_rename_event_prompt_i18n_is_complete_and_first_person():
 
     zh_label, zh_text = render_profile_rename_event_context("zh-CN", "旧角色", "新角色")
     assert zh_label == "我的改名记录"
-    assert "我以前的档案名" in zh_text
+    assert "我曾用名" in zh_text
     assert "旧角色" in zh_text
     assert "新角色" in zh_text
     assert "只代表改名前的历史称呼" not in zh_text
 
     en_label, en_text = render_profile_rename_event_context("en", "Old", "New")
     assert en_label == "My Profile Rename Record"
-    assert "My previous profile name" in en_text
+    assert "formerly known as" in en_text
     assert "Old" in en_text
     assert "New" in en_text
     assert "historical name before the rename" not in en_text
+
+
+@pytest.mark.unit
+def test_profile_rename_event_master_is_person_neutral():
+    """主人改名记录进的是猫娘 persona 的 master section，读者是猫娘、
+    改名的是用户。第一人称会让猫娘误以为是自己改名，所以这里去掉人称、
+    用中性陈述，既不能出现「我」也不带「你」。"""
+    from config.prompts.prompts_memory import (
+        PROFILE_RENAME_EVENT_FIELD_MASTER,
+        PROFILE_RENAME_EVENT_TEXT_MASTER,
+        render_profile_rename_event_context,
+    )
+
+    expected_langs = {"zh", "zh-TW", "en", "ja", "ko", "ru", "es", "pt"}
+    assert set(PROFILE_RENAME_EVENT_FIELD_MASTER) == expected_langs
+    assert set(PROFILE_RENAME_EVENT_TEXT_MASTER) == expected_langs
+
+    zh_label, zh_text = render_profile_rename_event_context("zh-CN", "旧名", "新名", entity="master")
+    assert zh_label == "改名记录"
+    assert "旧名" in zh_text and "新名" in zh_text
+    # 去人称：既无第一人称「我」也无第二人称「你」。
+    assert "我" not in zh_text
+    assert "你" not in zh_text
+
+    en_label, en_text = render_profile_rename_event_context("en", "Old", "New", entity="master")
+    assert en_label == "Profile Rename Record"
+    assert "Old" in en_text and "New" in en_text
+    assert "My " not in en_text and "Your " not in en_text
+
+    # 缺省（neko）仍是第一人称，主人变体不影响默认行为。
+    _, neko_text = render_profile_rename_event_context("zh-CN", "旧名", "新名")
+    assert "我曾用名" in neko_text
+
+
+@pytest.mark.unit
+def test_master_effective_payload_rename_context_is_person_neutral(monkeypatch):
+    monkeypatch.setattr("utils.language_utils.get_global_language_full", lambda: "zh-CN")
+    from utils.config_manager import _build_effective_character_payload
+
+    payload = {
+        "档案名": "新主人名",
+        "_reserved": {
+            "ai_context": {
+                "rename_events": [
+                    {"type": "profile_rename", "old_name": "旧主人名", "new_name": "新主人名"},
+                ]
+            }
+        },
+    }
+    effective = _build_effective_character_payload(payload, entity="master")
+    context = effective["__ai_context.profile_rename_events"]
+    assert "旧主人名" in context and "新主人名" in context
+    assert "我" not in context
+    assert "你" not in context
 
 
 @pytest.mark.unit
@@ -150,7 +204,7 @@ def test_profile_rename_event_uses_collision_safe_synthetic_key(monkeypatch):
     assert effective["我的改名记录"] == "用户自己写的字段"
     hidden_context = effective["__ai_context.profile_rename_events"]
     assert "我的改名记录" in hidden_context
-    assert "我以前的档案名" in hidden_context
+    assert "我曾用名" in hidden_context
     assert "旧角色" in hidden_context
     assert "临时角色" in hidden_context
     assert "新角色" in hidden_context
@@ -164,7 +218,7 @@ def test_profile_rename_event_uses_collision_safe_synthetic_key(monkeypatch):
         for key, value in effective_with_internal_collision.items()
         if key.startswith("__ai_context.profile_rename_events.")
     ]
-    assert any("我以前的档案名" in str(value) for value in collision_values)
+    assert any("我曾用名" in str(value) for value in collision_values)
 
 
 @pytest.mark.unit
@@ -436,14 +490,15 @@ async def test_rename_catgirl_moves_runtime_and_legacy_memory_storage(monkeypatc
             _, _, _, effective_character_data, _, _, _, _, _ = cm.get_character_data()
             hidden_context = effective_character_data["新角色"]["__ai_context.profile_rename_events"]
             assert "我的改名记录" in hidden_context
-            assert "我以前的档案名" in hidden_context
+            assert "我曾用名" in hidden_context
             assert "旧角色" in hidden_context
             assert "新角色" in hidden_context
             from memory.persona import PersonaManager
             persona_md = PersonaManager().render_persona_markdown("新角色")
-            assert "__ai_context.profile_rename_events" in persona_md
+            # 合成字段的内部裸键不能泄漏进渲染给模型的 persona 文本，只保留本地化标签。
+            assert "__ai_context.profile_rename_events" not in persona_md
             assert "我的改名记录" in persona_md
-            assert "我以前的档案名" in persona_md
+            assert "我曾用名" in persona_md
             assert "旧角色" in persona_md
             assert "新角色" in persona_md
             assert not (Path(cm.memory_dir) / "旧角色").exists()
@@ -509,15 +564,19 @@ async def test_rename_master_adds_hidden_ai_context_and_master_save_preserves_it
 
             _, _, master_basic_config, _, _, _, _, _, _ = cm.get_character_data()
             hidden_context = master_basic_config["__ai_context.profile_rename_events"]
-            assert "我的改名记录" in hidden_context
-            assert "我以前的档案名" in hidden_context
+            # 主人改名记录进的是猫娘 persona 的 master section，去掉人称用中性陈述，
+            # 既不能第一人称「我」（否则猫娘会以为是自己改了名），也不带第二人称「你」。
+            assert "改名记录" in hidden_context
+            assert "我" not in hidden_context
+            assert "你" not in hidden_context
             assert old_master_name in hidden_context
             assert "新主人" in hidden_context
 
             from memory.persona import PersonaManager
             persona_md = PersonaManager().render_persona_markdown(current_catgirl)
-            assert "__ai_context.profile_rename_events" in persona_md
-            assert "我的改名记录" in persona_md
+            # 同上：裸键不泄漏，且主人段无人称。
+            assert "__ai_context.profile_rename_events" not in persona_md
+            assert "改名记录" in persona_md
             assert old_master_name in persona_md
             assert "新主人" in persona_md
 
